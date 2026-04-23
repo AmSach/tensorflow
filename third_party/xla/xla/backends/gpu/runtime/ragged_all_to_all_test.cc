@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "xla/backends/gpu/runtime/ragged_all_to_all.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -143,10 +144,11 @@ TEST_F(RaggedAllToAllKernelTest, KernelWithArrayOfOutputPointers) {
   for (int64_t i = 0; i < num_outputs; ++i) {
     output_buffers_array[i] = output_buffers[i].address().opaque();
   }
+  size_t output_sym_offset = 0;
 
   TF_ASSERT_OK(RunRaggedAllToAllKernel(
       stream.get(), primitive_util::NativeToPrimitiveType<T>(),
-      input_buffer.address(), output_buffers_array,
+      input_buffer.address(), output_buffers_array, output_sym_offset,
       input_offsets_buffer.address(), send_sizes_buffer.address(),
       output_offsets_buffer.address(), num_outputs, num_update_per_output,
       num_input_rows, num_row_elements));
@@ -209,13 +211,14 @@ TEST_F(RaggedAllToAllKernelTest, KernelWithOutputPtrsInDeviceMemory) {
 
   stream_executor::DeviceAddressHandle output_buffers_ptr_buffer =
       CreateDeviceBuffer(executor, output_buffers_span);
+  size_t output_sym_offset = 0;
 
   TF_ASSERT_OK(RunRaggedAllToAllKernel(
       stream.get(), primitive_util::NativeToPrimitiveType<T>(),
       input_buffer.address(), output_buffers_ptr_buffer.address(),
-      input_offsets_buffer.address(), send_sizes_buffer.address(),
-      output_offsets_buffer.address(), num_outputs, num_update_per_output,
-      num_input_rows, num_row_elements));
+      output_sym_offset, input_offsets_buffer.address(),
+      send_sizes_buffer.address(), output_offsets_buffer.address(), num_outputs,
+      num_update_per_output, num_input_rows, num_row_elements));
 
   std::vector<std::vector<T>> output_results =
       CopyDeviceToHost2D<T>(executor, output_buffers, n);

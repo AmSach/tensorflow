@@ -56,6 +56,10 @@ bool IsAllReduceOp(const HloInstruction* instr) {
       instr);
 }
 
+bool IsRaggedAllToAllOp(const HloInstruction* instr) {
+  return HloPredicateIsOp<HloOpcode::kRaggedAllToAll>(instr);
+}
+
 int64_t GetShapeSize(const Shape& shape) {
   if (shape.IsTuple()) {
     int64_t size_in_bytes = 0;
@@ -111,26 +115,23 @@ absl::StatusOr<bool> AssignNvshmemBackend(
         continue;
       }
 
-      ASSIGN_OR_RETURN(GpuBackendConfig gpu_config,
-                       instr->backend_config<GpuBackendConfig>());
-      gpu_config.mutable_collective_backend_config()->set_backend(
+      ASSIGN_OR_RETURN(auto config, instr->backend_config<GpuBackendConfig>());
+      config.mutable_collective_backend_config()->set_backend(
           CollectiveBackendConfig::NVSHMEM);
 
       VLOG(1) << "CollectiveBackendAssigner: setting backend to NVSHMEM for "
               << instr->name();
 
-      RETURN_IF_ERROR(instr->set_backend_config(gpu_config));
+      RETURN_IF_ERROR(instr->set_backend_config(config));
       changed = true;
     }
   }
   return changed;
 }
 
-// Assigns collectives_mode for collective-permute operations based on the
-// xla_gpu_collective_permute_mode debug option.
-absl::StatusOr<bool> AssignCollectivePermuteMode(HloModule* module) {
-  const auto mode =
-      module->config().debug_options().xla_gpu_collective_permute_mode();
+absl::StatusOr<bool> AssignCollectivesMode(
+    HloModule* module, DebugOptions::CollectivesMode mode,
+    bool (*predicate)(const HloInstruction*)) {
   if (mode == DebugOptions::COLLECTIVES_PRIVATE_MEMORY) {
     return false;
   }
@@ -138,15 +139,13 @@ absl::StatusOr<bool> AssignCollectivePermuteMode(HloModule* module) {
   bool changed = false;
   for (HloComputation* comp : module->computations()) {
     for (HloInstruction* instr : comp->instructions()) {
-      if (!IsCollectivePermuteOp(instr)) {
+      if (!predicate(instr)) {
         continue;
       }
 
-      ASSIGN_OR_RETURN(GpuBackendConfig gpu_config,
-                       instr->backend_config<GpuBackendConfig>());
-      gpu_config.mutable_collective_backend_config()->set_collectives_mode(
-          mode);
-      RETURN_IF_ERROR(instr->set_backend_config(gpu_config));
+      ASSIGN_OR_RETURN(auto config, instr->backend_config<GpuBackendConfig>());
+      config.mutable_collective_backend_config()->set_collectives_mode(mode);
+      RETURN_IF_ERROR(instr->set_backend_config(config));
       changed = true;
     }
   }
@@ -159,6 +158,7 @@ absl::StatusOr<bool> CollectiveBackendAssigner::RunImpl(
     HloModule* module,
     const absl::flat_hash_set<absl::string_view>& execution_threads) {
   bool changed = false;
+  const auto& debug_options = module->config().debug_options();
 
   if (module->config().debug_options().xla_gpu_experimental_enable_nvshmem()) {
     ASSIGN_OR_RETURN(
@@ -168,8 +168,25 @@ absl::StatusOr<bool> CollectiveBackendAssigner::RunImpl(
     changed |= nvshmem_changed;
   }
 
-  ASSIGN_OR_RETURN(bool mode_changed, AssignCollectivePermuteMode(module));
-  changed |= mode_changed;
+  bool ragged_all_to_all_zero_copy =
+      debug_options
+          .xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl() &&
+      debug_options.xla_gpu_experimental_ragged_all_to_all_zero_copy();
+  if (ragged_all_to_all_zero_copy) {
+    ASSIGN_OR_RETURN(bool ragged_all_to_all_mode_changed,
+                     AssignCollectivesMode(
+                         module, DebugOptions::COLLECTIVES_SYMMETRIC_MEMORY,
+                         IsRaggedAllToAllOp));
+    changed |= ragged_all_to_all_mode_changed;
+  }
+
+  ASSIGN_OR_RETURN(
+      bool permute_mode_changed,
+      AssignCollectivesMode(
+          module,
+          module->config().debug_options().xla_gpu_collective_permute_mode(),
+          IsCollectivePermuteOp));
+  changed |= permute_mode_changed;
 
   return changed;
 }

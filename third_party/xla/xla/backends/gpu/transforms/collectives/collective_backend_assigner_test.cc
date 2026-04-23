@@ -353,6 +353,62 @@ TEST_F(CollectiveBackendAssignerTest,
       absl_testing::IsOkAndHolds(DebugOptions::COLLECTIVES_MODE_INVALID));
 }
 
+TEST_F(CollectiveBackendAssignerTest,
+       OneShotRaggedAllToAllSymmetricMemorySetsMode) {
+  absl::string_view kHloText = R"(
+    HloModule module, num_partitions=1, replica_count=2
+
+    ENTRY entry {
+      input = f32[16] parameter(0)
+      output = f32[16] parameter(1)
+      input_offsets = s32[2] parameter(2)
+      send_sizes = s32[2] parameter(3)
+      output_offsets = s32[2] parameter(4)
+      recv_sizes = s32[2] parameter(5)
+      ROOT ra2a = f32[16] ragged-all-to-all(input, output, input_offsets,
+      send_sizes, output_offsets, recv_sizes), replica_groups={{0,1}}
+    }
+  )";
+  // Default is COLLECTIVES_MODE_INVALID — collectives_mode should not be set.
+  {
+    TF_ASSERT_OK_AND_ASSIGN(auto module,
+                            ParseAndReturnVerifiedModule(kHloText));
+
+    EXPECT_THAT(RunCollectiveBackendAssigner(
+                    module.get(), /*num_devices_per_host=*/1, /*slice_size=*/0),
+                absl_testing::IsOk());
+
+    const HloInstruction* ragged_all_to_all =
+        module->entry_computation()->root_instruction();
+    EXPECT_THAT(
+        GetCollectivesMode(ragged_all_to_all),
+        absl_testing::IsOkAndHolds(DebugOptions::COLLECTIVES_MODE_INVALID));
+  }
+
+  // Set ragged_all_to_all_zero_copy and verify that ra2a instruction
+  // collective_backend_config has collectives_mode set to
+  // COLLECTIVES_SYMMETRIC_MEMORY
+  {
+    TF_ASSERT_OK_AND_ASSIGN(auto module,
+                            ParseAndReturnVerifiedModule(kHloText));
+    DebugOptions& debug_options =
+        module->mutable_config().mutable_debug_options();
+    debug_options
+        .set_xla_gpu_experimental_ragged_all_to_all_use_barrier_with_nccl(true);
+    debug_options.set_xla_gpu_experimental_ragged_all_to_all_zero_copy(true);
+
+    EXPECT_THAT(RunCollectiveBackendAssigner(
+                    module.get(), /*num_devices_per_host=*/1, /*slice_size=*/0),
+                absl_testing::IsOkAndHolds(true));
+
+    const HloInstruction* ragged_all_to_all =
+        module->entry_computation()->root_instruction();
+    EXPECT_THAT(
+        GetCollectivesMode(ragged_all_to_all),
+        absl_testing::IsOkAndHolds(DebugOptions::COLLECTIVES_SYMMETRIC_MEMORY));
+  }
+}
+
 }  // namespace
 }  // namespace gpu
 }  // namespace xla
