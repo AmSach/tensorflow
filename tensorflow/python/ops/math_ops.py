@@ -812,8 +812,7 @@ def sign(x, name=None):
         cast(
             gen_math_ops.complex_abs(
                 x,
-                Tout=dtypes.float32
-                if x.dtype == dtypes.complex64 else dtypes.float64),
+                Tout=dtypes.float64),  # Always use float64 to avoid underflow for small complex values
             dtype=x.dtype),
         name=name)
   return gen_math_ops.sign(x, name=name)
